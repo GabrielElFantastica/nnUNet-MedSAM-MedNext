@@ -9,18 +9,196 @@ Robust experiements on LFM's ability of medial segmentation
 
 # Adversarial Data Augmentation with Chained Transformations (AdvChain)
 
-This repo contains the pytorch implementation of adversarial data augmentation, which supports to perform adversarial training on a chain of image photometric transformations and geometric transformations for improved consistency regularization.
-Please cite our work if you find it useful in your work.
+This repo is based on the code of 3 large foundation models.
+[nnUNet](https://github.com/MIC-DKFZ/nnUNet)
+[MedSAM](https://github.com/bowang-lab/MedSAM)
+[MedNext](https://github.com/MIC-DKFZ/MedNeXt)
+while the code of implementing adversarial attack is based on the work of these 2 papers.
+[PGD-MNIST](https://github.com/MadryLab/mnist_challenge)
+[advchain](https://github.com/cherise215/advchain)
 
-[Full Paper](<https://authors.elsevier.com/sd/article/S1361-8415(22)00230-4>)
+## Set up
 
-## License:
+Mainly used two environments
 
-All rights reserved.
+- According to the installation instruction of [nnUNet](https://github.com/MIC-DKFZ/nnUNet) set the environment nn-unet
+- According to the [MedSAM](https://github.com/bowang-lab/MedSAM) set the environment medsam
+- Install the work of [MedNext](https://github.com/MIC-DKFZ/MedNeXt) under the environment nn-unet. Change the default variables if necessary.
+
+## Training Models and collecting raw results
+
+For models nnUnet and MedNext, use prewritten code from nnunet and MedNext through shell files in HPC/. See nnunet.sh and MedNext.sh for more details
+
+For model MedSAM, the code used is written in python files and run by HPC. See medsam.sh and train_one_gpu.py for more details.
+
+## White Box Attack
+
+Use attack.py to perform white attack on nnUNet and MedNext.
+
+Use attack.py to perform white attack on MedSAM.
+
+## Black Box Attack
+
+Use attack_black.py to perform white attack on nnUNet and MedNext.
+
+Use attack_black.py to perform white attack on MedSAM.
+
+## Example
+
+
+
+
+
+## Example Code
+
+First let's see a sample slice preprocessed by nnUNet:
+
+<p align="center">
+  <img align="center" src="assets/advchain_logo.png" width="500">
+  </a>
+</p>
+
+Assuming that you already have the environment and the checkpoint files.
+
+Define the function of fgsm and pgd attack. For bias attack, use code from [advchain](https://github.com/cherise215/advchain)
+```python
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from advchain.augmentor import AdvBias  # AdvBias class from advchain
+
+# PGD Attack: A multi-step adversarial attack that iteratively applies perturbations to maximize the impact while staying within a specified epsilon bound.
+def pgd_attack(model, images, labels, epsilon=0.1, alpha=2/255, iterations=10, device='cuda'):
+    images = images.to(device)
+    labels = torch.squeeze(labels, dim=1).to(device)
+
+    loss_fn = nn.CrossEntropyLoss()
+    original_images = images.data.clone()
+
+    for i in range(iterations):
+        images.requires_grad = True
+        outputs = model(images)
+
+        model.zero_grad()
+        loss = loss_fn(outputs, labels).to(device)
+        loss.backward()
+
+        # Apply perturbation and clamp within epsilon bounds
+        adv_images = images + alpha * images.grad.sign()
+        eta = torch.clamp(adv_images - original_images, min=-epsilon, max=epsilon)
+        images = torch.clamp(original_images + eta, min=0, max=1).detach()
+
+    return images
+
+# FGSM Attack: A single-step adversarial attack that applies the sign of the gradient of the loss with respect to the input to create perturbations.
+def fgsm_attack(model, images, labels, epsilon=0.03, device='cuda'):
+    images = images.to(device)
+    labels = torch.squeeze(labels, dim=1).to(device)
+
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Enable gradient calculation for images
+    images.requires_grad = True
+    outputs = model(images)
+
+    model.zero_grad()
+    loss = loss_fn(outputs, labels).to(device)
+    loss.backward()
+
+    # Create adversarial images by applying the sign of the gradient
+    pertubation = epsilon * images.grad.sign()
+    adv_images = images + pertubation
+    adv_images = torch.clamp(adv_images, min=0, max=1).detach()
+
+    return adv_images
+
+# Bias Field Attack: Introduces spatial variations in intensity (bias) across the image, simulating real-world artifacts in medical images.
+def bias_field_attack(model, images, labels, epsilon=0.1, control_point_spacing=[64, 64, 64], device='cuda'):
+    images = images.to(device)
+    labels = torch.squeeze(labels, dim=1).to(device)
+
+    # Create an instance of the bias field attack (assuming AdvBias is a defined class)
+    augmentor_bias = AdvBias(
+        spatial_dims=3,
+        config_dict={
+            'epsilon': epsilon,
+            'control_point_spacing': control_point_spacing,
+            'downscale': 2,
+            'data_size': images.shape,
+            'interpolation_order': 3,
+            'init_mode': 'random',
+            'space': 'log'
+        },
+        debug=False  # Set to True for intermediate outputs
+    )
+
+    # Apply bias field perturbation
+    adv_images = augmentor_bias.forward(images).detach()
+
+    return adv_images
+```
+
+Calculate the dice score and success rate
+
+```python
+def compute_tp_fp_fn_tn(mask_ref: np.ndarray, mask_pred: np.ndarray, ignore_mask: np.ndarray = None):
+    if ignore_mask is None:
+        use_mask = np.ones_like(mask_ref, dtype=bool)
+    else:
+        use_mask = np.logical_not(ignore_mask)  # Use logical_not for NumPy arrays
+    
+    tp = np.sum(np.logical_and(mask_ref, mask_pred) & use_mask)  # Use logical_and for TP
+    fp = np.sum(np.logical_and(np.logical_not(mask_ref), mask_pred) & use_mask)  # Logical for FP
+    fn = np.sum(np.logical_and(mask_ref, np.logical_not(mask_pred)) & use_mask)  # Logical for FN
+    tn = np.sum(np.logical_and(np.logical_not(mask_ref), np.logical_not(mask_pred)) & use_mask)  # Logical for TN
+    
+    return tp, fp, fn, tn
+
+def compute_metrics(segmentation: np.ndarray, label: np.ndarray):
+    batch_size = segmentation.shape[0]
+    dice_list = []
+    success_list = []
+    
+    # Convert label tensor to NumPy array if it's a tensor
+    mask_ref = label.cpu().numpy() if hasattr(label, 'cpu') else label
+    mask_pred = segmentation
+
+    for i in range(batch_size):
+        tp, fp, fn, tn = compute_tp_fp_fn_tn(mask_ref[i], mask_pred[i])
+        
+        if tp + fp + fn == 0:
+            dice = np.nan
+        else:
+            dice = 2 * tp / (2 * tp + fp + fn)
+        
+        dice_list.append(dice)
+        success_list.append(1 if dice >= 0.5 else 0)
+
+    return dice_list, success_list
+```
+
+Store the attacked images with epsilon. e.g. The image attacked by pgd at epsilon 0.3 shall be named image_pgd_3
+
+<p align="center">
+  <img align="center" src="assets/advchain_logo.png" width="500">
+  </a>
+</p>
+
+Now implement the attacked image on another model to collect the result for black attack.
+
+```python
+# Initialize a new model.
+
+# Predict with attacked image
+segmentation = model(adv_image)
+
+# Calculate metrics on new predictions
+dice, success = compute_metrics(segmentation, label)
+```
 
 ## Citation
 
-If you find this useful for your work, please consider citing
+For more
 
 ```
 @ARTICLE{Chen_2021_Enhancing,
@@ -32,79 +210,5 @@ If you find this useful for your work, please consider citing
     year = 2022,
     note = {\url{https://authors.elsevier.com/sd/article/S1361-8415(22)00230-4}}
 }
-
-@INPROCEEDINGS{Chen_MICCAI_2020_Realistic,
-  title     = "Realistic Adversarial Data Augmentation for {MR} Image
-               Segmentation",
-  booktitle = "Medical Image Computing and Computer Assisted Intervention --
-               {MICCAI} 2020",
-  author    = "Chen, Chen and Qin, Chen and Qiu, Huaqi and Ouyang, Cheng and
-               Wang, Shuo and Chen, Liang and Tarroni, Giacomo and Bai, Wenjia
-               and Rueckert, Daniel",
-  publisher = "Springer International Publishing",
-  pages     = "667--677",
-  year      =  2020
-}
-
-```
-
-## Introduction
-
-AdvChain is a **differentiable** data augmentation library, which supports to augment 2D/3D image tensors with _optimized_ data augmentation parameters. It takes both image information and network's current knowledge into account, and utilizes these information to find effective transformation parameters that are beneficial for the downstream segmentation task. Specifically, the underlying image transformation parameters are optimized so that the dissimilarity/inconsistency between the network's output for clean data and the output for perturbed/augmented data is maximized.
-
-<img align="center" src="assets/advchain.png" width="800">
-
-As shown below, the learned adversarial data augmentation focuses more on deforming/attacking region of interest, generating realistic adversarial examples that the network is sensitive at. In our experiments, we found that augmenting the training data with these adversarial examples are beneficial for enhancing the segmentation network's generalizability.
-<img align="center" src="assets/cardiac_example.png" width="750">
-
-## Requirements
-
-- matplotlib>=2.0
-- seaborn>=0.10.0
-- numpy>=1.13.3
-- SimpleITK>=2.1.0
-- skimage>=0.0
-- torch>=1.9.0
-
-## Set Up
-
-1.  Upgrade pip to the latest:
-    ```
-    pip install --upgrade pip
-    ```
-1.  Install PyTorch and other required python libraries with:
-    ```
-    pip install -r requirements.txt
-    ```
-1.  Play with the provided jupyter notebook to check the enviroments, see `example/adv_chain_data_generation_cardiac_2D_3D.ipynb` to find example usage.
-
-## Usage
-
-2. Import the library and then add it to your training codebase. Please refer to examples under the `example/` folder for more details.
-
-### Example Code
-
-First set up a set of transformation functions:
-
-```python
-
-
-```
-
-We can then compose them by putting them in a list with a specified order and initialize a solver to perform random/adversarial data augmentation
-
-```python
-
-```
-
-To perform random data augmentation, simply initialize transformation parameters and call `solver.forward`
-
-```python
-
-```
-
-To perform adversarial data augmentation for adversarial training, a 2D/3D segmentation model `model` is needed.
-
-```python
 
 ```
